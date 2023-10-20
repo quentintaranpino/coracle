@@ -3,6 +3,7 @@
   import {nip19} from "nostr-tools"
   import {without} from "ramda"
   import {throttle} from "hurdak"
+  import {Tags} from 'paravel'
   import {writable} from "svelte/store"
   import {annotateMedia} from "src/util/misc"
   import {asNostrEvent} from "src/util/nostr"
@@ -18,14 +19,13 @@
   import RelayCard from "src/app/shared/RelayCard.svelte"
   import NoteContent from "src/app/shared/NoteContent.svelte"
   import RelaySearch from "src/app/shared/RelaySearch.svelte"
-  import {Publisher, publishNote, displayRelay, getUserRelayUrls, mention} from "src/engine"
+  import {Publisher, publishNote, displayRelay, getUserRelayUrls, mention, getSettings} from "src/engine"
   import {toastProgress} from "src/app/state"
   import {router} from "src/app/router"
   import {session, getEventHints, displayPubkey} from "src/engine"
 
   export let quote = null
   export let pubkey = null
-  export let writeTo: string[] | null = null
 
   let q = ""
   let images = []
@@ -34,11 +34,13 @@
   let wordCount = 0
   let showPreview = false
   let showSettings = false
-  let relays = writable(writeTo ? writeTo : getUserRelayUrls("write"))
+  let relays = writable(getUserRelayUrls("write"))
+  let nip94Events = []
+  let settings = getSettings()
 
   const onSubmit = async () => {
     const tags = []
-    const content = compose.parse().trim()
+    let content = compose.parse().trim()
 
     if (!content) {
       return
@@ -52,10 +54,13 @@
       tags.push(mention(quote.pubkey))
 
       // Re-broadcast the note we're quoting
-      Publisher.publish({
-        relays: $relays,
-        event: asNostrEvent(quote),
-      })
+      Publisher.publish({relays: $relays, event: asNostrEvent(quote)})
+    }
+
+    if (nip94Events.length > 0 && settings.nip94_events) {
+      await Promise.all(
+        nip94Events.map(event => Publisher.publish({relays: $relays, event}))
+      )
     }
 
     const pub = await publishNote(content, tags, $relays)
@@ -65,21 +70,37 @@
     router.clearModals()
   }
 
-  const addImage = url => {
-    images = images.concat(url)
-    compose.write("\n" + url)
+  const addImage = event => {
+    images = images.splice(0).concat(images.concat(Tags.from(event).type("url").values().first()))
+    event.nevent = "nostr:" + nip19.neventEncode({id: event.id, relays: $relays})
+    nip94Events.push(event)
+    if (settings.nip94_events) {
+      compose.write("\n" + event.nevent)
+    } else {
+      compose.write("\n" + Tags.from(event).type("url").values().first())
+    }
   }
 
   const removeImage = url => {
-    const content = compose.parse()
 
-    compose.clear()
-    compose.write(content.replace(url, ""))
+    for (const event of nip94Events) {
+      if (Tags.from(event).type("url").values().first() === url) {
+        const content = compose.parse()
+        compose.clear()
+        if (settings.nip94_events) {
+          compose.write(content.replace(event.nevent, "")) //NIP94 enabled
+        } else {
+          compose.write(content.replace(url, "")) //NIP94 disabled
+        }
+        nip94Events = without([event], nip94Events)
+      }
+    }
 
     images = without([url], images)
+
   }
 
-  const closeSettings = () => {
+  const closeSettings = () => { 
     q = ""
     showSettings = false
   }
@@ -95,6 +116,19 @@
 
   const togglePreview = () => {
     showPreview = !showPreview
+
+    //Replace compose nevent for inages array urls
+    if (settings.nip94_events){
+      for (const event of nip94Events) {
+        const content = compose.parse()
+        compose.clear()
+        if (showPreview){
+        compose.write(content.replace(event.nevent,Tags.from(event).type("url").values().first()))
+        }else{
+        compose.write(content.replace(Tags.from(event).type("url").values().first(),event.nevent))
+        }
+      }
+    }
   }
 
   const setWordCount = throttle(300, () => {
@@ -110,9 +144,9 @@
 
     if (quote) {
       const nevent = nip19.neventEncode({id: quote.id, relays: getEventHints(quote)})
-
       compose.nevent("nostr:" + nevent)
     }
+
   })
 </script>
 

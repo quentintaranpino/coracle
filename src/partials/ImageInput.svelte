@@ -1,13 +1,13 @@
 <script lang="ts">
   import {identity} from "ramda"
-  import {filterVals} from "hurdak"
+  import {filterVals, displayList} from "hurdak"
   import Input from "src/partials/Input.svelte"
   import Modal from "src/partials/Modal.svelte"
   import Content from "src/partials/Content.svelte"
   import Spinner from "src/partials/Spinner.svelte"
   import Anchor from "src/partials/Anchor.svelte"
   import {listenForFile, stripExifData, blobToFile} from "src/util/html"
-  import {uploadToNostrBuild} from "src/engine"
+  import {uploadToMediaProvider, getSettings, createNIP94} from "src/engine"
 
   export let icon = null
   export let value = null
@@ -19,6 +19,7 @@
   let input, listener, loading
   let files = []
   let isOpen = false
+  let settings = getSettings()
 
   $: {
     if (input) {
@@ -39,18 +40,31 @@
               })
             )
 
-            const body = new FormData()
+            const results = await Promise.all(
+              files.map(async file => {
+                const body = new FormData()
 
-            for (const file of files) {
-              body.append("file[]", file)
-            }
+                body.append("file[]", file)
 
-            const result = await uploadToNostrBuild(body)
+                return createNIP94(
+                  await Promise.all(
+                    settings.nip96_urls.map(async url => {
+                      try {
+                        return await uploadToMediaProvider(url, body)
+                      } catch (e) {
+                        console.error(e)
+                      }
+                    })
+                  )
+                )
+              })
+            )
 
-            // Legacy weirdness
-            for (const {url} of result.data) {
-              value = url
-              onChange?.(url)
+            for (const result of results) {
+              if (result) {
+                value = result
+                onChange?.(value)
+              }
             }
           } finally {
             isOpen = false
@@ -93,7 +107,7 @@
   <Modal mini onEscape={decline}>
     <Content>
       {#if loading}
-        <Spinner delay={0}>Uploading your media...</Spinner>
+        <Spinner delay={0}>Uploading files using: {displayList(settings.nip96_urls)}</Spinner>
       {:else}
         <h1 class="staatliches text-2xl">Upload a File</h1>
         <p>Click below to select a file to upload.</p>
